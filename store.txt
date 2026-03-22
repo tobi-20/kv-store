@@ -1,0 +1,3 @@
+state,ekiti
+tribe,nigeria
+name,tobiloba
