@@ -50,14 +50,14 @@ func (s *Store) Set(key, value string) {
 		log.Fatal(err)
 	}
 
-	fmt.Fprintf(f, "%s,%s\n", key, value)
-	s.index[key] = value
+	fmt.Fprintf(f, "%s,%s\n", key, value) // write to memory
+	s.index[key] = value                  // write to disk
 	f.Close()
 	// t := compact()
 	// fmt.Println(t)
 }
 func (s *Store) Get(key string) (string, error) {
-	//When you want to look up a value, use the in-memory hash map to find the offset for the key, then seek to that location in the data file and read the value
+	// When you want to look up a value, use the in-memory hash map to find the offset for the key, then seek to that location in the data file and read the value
 	if s.index[key] == "" {
 		return "", errors.New("key does not exist")
 	}

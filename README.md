@@ -15,6 +15,9 @@ Bitcask model described in Designing Data-Intensive Applications (DDIA) Chapter 
 - Atomic file swapping during compaction
 - Separation of concerns between storage and indexing
 
+## Caveat(s)
+- All the keys must fit in the available RAM,
+
 ## Usage
 go run .
 
