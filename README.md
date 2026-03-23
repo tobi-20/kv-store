@@ -18,6 +18,18 @@ Bitcask model described in Designing Data-Intensive Applications (DDIA) Chapter 
 ## Caveat(s)
 - All the keys must fit in the available RAM,
 
+## Time Complexity
+- Write: O(1), append to end of file and update map
+- Read: O(1), pure map lookup
+- Compaction: O(n), scan whole file once
+- Startup/crash recovery: O(n), replay entire log to rebuild map
+
+## Space Complexity
+- Write: O(n), every key in RAM
+- Read: O(n), rebuild full map
+- Compaction: O(n), full map in memory
+- Startup/crash recovery: O(n), rebuild full map
+
 ## Usage
 go run .
 
