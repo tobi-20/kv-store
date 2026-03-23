@@ -39,6 +39,3 @@ This engine was built in two stages:
 ## Reference
 - Designing Data-Intensive Applications, Chapter 3 — Storage and Retrieval
 
-git add README.md
-git commit -m "docs: update README with SSTable implementation details"
-git push origin master
