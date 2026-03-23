@@ -6,20 +6,25 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 )
 
 type Store struct {
-	index map[string]string
-	path  string
+	index        map[string]string
+	memtable     map[string]string
+	memtableSize int
+	sstableCount int
+	path         string
 }
 
 // load file from disk
 func NewStore(path string) (*Store, error) {
 
 	s := &Store{
-		index: make(map[string]string),
-		path:  path,
+		index:    make(map[string]string),
+		memtable: make(map[string]string),
+		path:     path,
 	}
 
 	f, err := os.Open(s.path)
@@ -31,6 +36,16 @@ func NewStore(path string) (*Store, error) {
 	}
 
 	defer f.Close()
+	files, err := os.ReadDir(".")
+	if err != nil {
+		log.Println(err)
+	}
+
+	for _, v := range files {
+		if strings.HasPrefix(v.Name(), "ssl_") {
+			s.sstableCount++
+		}
+	}
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -44,25 +59,43 @@ func NewStore(path string) (*Store, error) {
 
 func (s *Store) Set(key, value string) {
 
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	//"When a write comes in, add it to an in-memory balanced tree data structure. This in-memory tree is sometimes called a memtable. When the memtable gets bigger than some threshold write it out to disk as an SSTable file."
+	s.memtable[key] = value // write to memtable
 
-	if err != nil {
-		log.Fatal(err)
+	s.memtableSize += len(value) + len(key)
+	if s.memtableSize >= 4096 {
+		s.flushMemtable()
 	}
 
-	fmt.Fprintf(f, "%s,%s\n", key, value) // write to memory
-	s.index[key] = value                  // write to disk
-	f.Close()
-	// t := compact()
-	// fmt.Println(t)
 }
 func (s *Store) Get(key string) (string, error) {
-	// When you want to look up a value, use the in-memory hash map to find the offset for the key, then seek to that location in the data file and read the value
-	if s.index[key] == "" {
-		return "", errors.New("key does not exist")
+	v := s.memtable[key]
+	if v != "" {
+		return v, nil
 	}
-	return s.index[key], nil
+	for i := s.sstableCount - 1; i >= 0; i-- {
+
+		filePath := fmt.Sprintf("ssl_%d.txt", i)
+		f, err := os.Open(filePath)
+		if err != nil {
+			return "", err
+
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := scanner.Text()
+			a := strings.Split(line, ",")
+			if key == a[0] {
+				f.Close()
+				return a[1], nil
+			}
+		}
+		f.Close()
+	}
+
+	return "", errors.New("key not found")
 }
+
 func (s *Store) Compact() error {
 	d := s.index
 	f, err := os.Create("compact.txt")
@@ -80,4 +113,34 @@ func (s *Store) Compact() error {
 	}
 
 	return nil
+}
+
+func (s *Store) flushMemtable() {
+	filepath := fmt.Sprintf("ssl_%d.txt", s.sstableCount)
+	f, err := os.Create(filepath)
+	s.sstableCount++
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	a := make([]string, 0, 4097)
+	for k := range s.memtable {
+		a = append(a, k)
+	}
+	slices.SortFunc(a, func(a string, b string) int {
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+
+		return 0
+	})
+	for _, k := range a {
+		fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k])
+	}
+	clear(s.memtable)
+	s.memtableSize = 0
+
 }

@@ -10,11 +10,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	store.Set("name", "tobiloba")
-	v, err := store.Get("name")
+	store.Set("when", "tomorrow")
+	res, err := store.Get("when")
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(v)
-	store.Compact()
+	fmt.Println(res)
 }
