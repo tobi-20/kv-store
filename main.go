@@ -6,13 +6,14 @@ import (
 )
 
 func main() {
-	store, err := NewStore("store.txt")
+	s, err := NewStore("store.txt")
 	if err != nil {
 		log.Fatal(err)
 	}
-	val, err := store.Get("crash_test")
-	if err != nil {
-		log.Fatal(err)
+
+	for i := 0; i < 2000; i++ {
+		s.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
 	}
-	fmt.Println(val)
+
+	s.Compact()
 }

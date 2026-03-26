@@ -25,11 +25,12 @@ This engine was built in two stages:
 - Crash recovery for both hash index and SSTable segments
 - Immutable file design
 - Sequential writes for performance
+- SSTable compaction 
+- Write ahead Log to preserve data in case of  unexpected crash or restart
 
 ## Known Limitations
-- Memtable is lost on crash if not flushed (Write ahead Log not yet implemented)
 - No sparse index yet
-- No SSTable compaction yet
+
 
 ## Next
 - Write-ahead log (WAL) for memtable durability
