@@ -27,10 +27,7 @@ This engine was built in two stages:
 - Sequential writes for performance
 - SSTable compaction 
 - Write ahead Log to preserve data in case of  unexpected crash or restart
-
-## Known Limitations
 - No sparse index yet
-
 
 ## Next
 - Write-ahead log (WAL) for memtable durability

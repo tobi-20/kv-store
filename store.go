@@ -4,18 +4,24 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"slices"
 	"strings"
 )
 
+type SparseIndexEntry struct {
+	key    string
+	offset int64
+}
 type Store struct {
 	memtable     map[string]string
 	memtableSize int
 	sstableCount int
 	path         string
 	wal          *os.File
+	index        map[string][]SparseIndexEntry
 }
 
 // load file from disk
@@ -25,6 +31,7 @@ func NewStore(path string) (*Store, error) {
 
 		memtable: make(map[string]string),
 		path:     path,
+		index:    make(map[string][]SparseIndexEntry),
 	}
 	wal, err := os.OpenFile("wal.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //"... if the database crashes, the most recent writes (which are in the memtable but not yet written out to disk) are lost. In order to avoid that problem, we can keep a separate log on disk to which every write is immediately appended"
 	if err != nil {
@@ -82,21 +89,38 @@ func (s *Store) Get(key string) (string, error) {
 	if ok {
 		return v, nil
 	}
+	startOffset := int64(0)
 	for i := s.sstableCount - 1; i >= 0; i-- {
 
 		filePath := fmt.Sprintf("ssl_%d.txt", i)
+		entries := s.index[filePath]
+		if len(entries) == 0 {
+			startOffset = int64(0)
+		}
+
+		for _, v := range entries {
+			if v.key <= key {
+				startOffset = v.offset
+			} else {
+				break
+			}
+		}
 		f, err := os.Open(filePath)
 		if err != nil {
 			return "", err
 
 		}
+		f.Seek(startOffset, io.SeekStart)
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			line := scanner.Text()
-			a := strings.Split(line, ",")
-			if key == a[0] {
-				f.Close()
-				return a[1], nil
+			parts := strings.Split(line, ",")
+			if len(parts) != 2 {
+				continue
+			}
+			k, v := parts[0], parts[1]
+			if k == key {
+				return v, nil
 			}
 		}
 		f.Close()
@@ -144,6 +168,8 @@ func (s *Store) Compact() {
 			line2 = scanner2.Text()
 			split2 = strings.Split(line2, ",")
 		}
+
+		//mergesort
 		for hasLine1 && hasLine2 {
 
 			if split1[0] < split2[0] {
@@ -224,18 +250,19 @@ func (s *Store) Compact() {
 }
 
 func (s *Store) flushMemtable() {
+
+	// for{}
 	filepath := fmt.Sprintf("ssl_%d.txt", s.sstableCount)
 	f, err := os.Create(filepath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	s.sstableCount++
 
-	a := make([]string, 0, 4097)
+	indexBuffer := make([]string, 0, 4097)
 	for k := range s.memtable {
-		a = append(a, k)
+		indexBuffer = append(indexBuffer, k)
 	}
-	slices.SortFunc(a, func(a string, b string) int {
+	slices.SortFunc(indexBuffer, func(a string, b string) int {
 		if a < b {
 			return -1
 		}
@@ -245,10 +272,34 @@ func (s *Store) flushMemtable() {
 
 		return 0
 	})
-	for _, k := range a {
-		fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k])
+
+	jump := 10
+	count := 0
+	if s.index[filepath] == nil {
+		s.index[filepath] = make([]SparseIndexEntry, 0, len(indexBuffer)/jump+1) // allocate proper capacity
 	}
 
+	for _, k := range indexBuffer {
+		offset, err := f.Seek(0, io.SeekCurrent) //beginning of the file (initialized for the first time)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k])
+
+		if count%jump == 0 {
+
+			// add to the SSTable's sparse index slice
+			s.index[filepath] = append(s.index[filepath], SparseIndexEntry{
+				key:    k,
+				offset: offset,
+			})
+		}
+
+		count++
+
+	}
+	s.sstableCount++
 	s.wal.Close()
 	err = os.Truncate("wal.log", 0)
 	if err != nil {
