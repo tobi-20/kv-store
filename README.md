@@ -1,5 +1,4 @@
 # KV Store
-
 A log-structured key-value storage engine built in Go, implementing concepts 
 from Designing Data-Intensive Applications (DDIA) Chapter 3.
 

@@ -97,7 +97,7 @@ func (s *Store) Get(key string) (string, error) {
 		if len(entries) == 0 {
 			startOffset = int64(0)
 		}
-
+		//binary search
 		for _, v := range entries {
 			if v.key <= key {
 				startOffset = v.offset
@@ -285,7 +285,7 @@ func (s *Store) flushMemtable() {
 			log.Fatal(err)
 		}
 
-		fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k])
+		fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k]) //write into file being flushed into
 
 		if count%jump == 0 {
 
