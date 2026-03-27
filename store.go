@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 )
 
 type SparseIndexEntry struct {
@@ -22,6 +23,7 @@ type Store struct {
 	path         string
 	wal          *os.File
 	index        map[string][]SparseIndexEntry
+	mu           sync.RWMutex
 }
 
 // load file from disk
@@ -72,7 +74,8 @@ func NewStore(path string) (*Store, error) {
 }
 
 func (s *Store) Set(key, value string) {
-
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	//"When a write comes in, add it to an in-memory balanced tree data structure. This in-memory tree is sometimes called a memtable. When the memtable gets bigger than some threshold write it out to disk as an SSTable file."
 
 	fmt.Fprintf(s.wal, "%s,%s\n", key, value) // write to WAL on disk before writing to memtable in case of unexpected crash/restart
@@ -85,6 +88,8 @@ func (s *Store) Set(key, value string) {
 
 }
 func (s *Store) Get(key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	v, ok := s.memtable[key]
 	if ok {
 		return v, nil
@@ -120,7 +125,9 @@ func (s *Store) Get(key string) (string, error) {
 			}
 			k, v := parts[0], parts[1]
 			if k == key {
+				f.Close()
 				return v, nil
+
 			}
 		}
 		f.Close()

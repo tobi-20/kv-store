@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"sync"
 )
 
 func main() {
@@ -12,31 +13,32 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// write enough to trigger multiple flushes and build sparse index
-	for i := 0; i < 2000; i++ {
-		s.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+	var wg sync.WaitGroup
+
+	// 100 goroutines writing simultaneously
+	for i := 0; i < 100; i++ {
+		wg.Add(1) //increments the counter by 1
+		go func(i int) {
+			defer wg.Done()
+			s.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
+		}(i)
 	}
 
-	// get via sparse index
-	tests := []string{"key0", "key500", "key999", "key1500", "key1999"}
-	for _, k := range tests {
-		val, err := s.Get(k)
-		if err != nil {
-			fmt.Printf("FAIL: %s, %v\n", k, err)
-		} else {
-			fmt.Printf("OK: %s, %s\n", k, val)
-		}
+	wg.Wait() // wait for all writes to finish
+
+	// 100 goroutines reading simultaneously
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			val, err := s.Get(fmt.Sprintf("key%d", i))
+			if err != nil {
+				fmt.Printf("FAIL: key%d\n", i)
+			} else {
+				fmt.Printf("OK: key%d → %s\n", i, val)
+			}
+		}(i)
 	}
 
-	s.Compact()
-	fmt.Printf("SSTable count after compact: %d\n", s.sstableCount)
-
-	for _, k := range tests {
-		val, err := s.Get(k)
-		if err != nil {
-			fmt.Printf("FAIL: %s, %v\n", k, err)
-		} else {
-			fmt.Printf("OK: %s, %s\n", k, val)
-		}
-	}
+	wg.Wait()
 }

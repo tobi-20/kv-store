@@ -27,6 +27,7 @@ This engine was built in two stages:
 - SSTable compaction 
 - Write ahead Log to preserve data in case of  unexpected crash or restart
 - No sparse index yet
+- concurrent read/write
 
 ## Next
 - Write-ahead log (WAL) for memtable durability
