@@ -13,8 +13,8 @@ func NewStore(path string) (*Store, error) {
 	s := &Store{
 
 		memtable: make(map[string]string),
-		path:     path,
 		index:    make(map[string][]SparseIndexEntry),
+		path:     path,
 	}
 	wal, err := os.OpenFile("wal.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //"... if the database crashes, the most recent writes (which are in the memtable but not yet written out to disk) are lost. In order to avoid that problem, we can keep a separate log on disk to which every write is immediately appended"
 	if err != nil {

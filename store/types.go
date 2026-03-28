@@ -6,8 +6,8 @@ import (
 )
 
 type SparseIndexEntry struct {
-	key    string
 	offset int64
+	key    string
 }
 type Store struct {
 	memtable     map[string]string

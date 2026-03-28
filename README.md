@@ -26,7 +26,7 @@ This engine was built in two stages:
 - Sequential writes for performance
 - SSTable compaction 
 - Write ahead Log to preserve data in case of  unexpected crash or restart
-- No sparse index yet
+- Sparse index
 - concurrent read/write
 
 ## Next
