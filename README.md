@@ -18,6 +18,24 @@ This engine was built in two stages:
 - SSTable files are immutable
 - sstableCount restored on restart via directory scan
 
+## Chapter 4: Encoding and Evolution
+
+Replaced CSV text format with a binary length-prefixed encoding:
+
+**Format per entry:**
+[4 bytes: key length][key bytes][4 bytes: value length][value bytes]
+
+**Why this matters:**
+- Values can contain any character including commas
+- Reads are faster — exact byte counts eliminate scanning
+- More compact than text format
+- Mirrors how production systems like Protobuf encode data internally
+
+**Applied to:**
+- SSTable files — binary encoded on flush
+- WAL — binary encoded on every write
+- WAL replay — binary decoded on restart
+
 ## What This Demonstrates
 - Log-structured storage design
 - Memtable + SSTable architecture
