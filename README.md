@@ -27,14 +27,14 @@ Replaced CSV text format with a binary length-prefixed encoding:
 
 **Why this matters:**
 - Values can contain any character including commas
-- Reads are faster — exact byte counts eliminate scanning
+- Reads are faster: exact byte counts eliminate scanning
 - More compact than text format
 - Mirrors how production systems like Protobuf encode data internally
 
 **Applied to:**
-- SSTable files — binary encoded on flush
-- WAL — binary encoded on every write
-- WAL replay — binary decoded on restart
+- SSTable files
+- WAL: binary encoded on every write
+- WAL replay: binary decoded on restart
 
 ## What This Demonstrates
 - Log-structured storage design
