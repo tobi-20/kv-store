@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -40,16 +42,33 @@ func NewStore(path string) (*Store, error) {
 	}
 
 	//read the wal log into the memtable in case of crash or sudden restart
-	scanner := bufio.NewScanner(q)
-	for scanner.Scan() {
-		line := scanner.Text()
-		a := strings.Split(line, ",")
-		if len(a) != 2 {
-			continue
+	reader := bufio.NewReader(q)
+	var keyLen, valueLen uint32
+	for {
+		err := binary.Read(reader, binary.BigEndian, &keyLen)
+		if err != nil {
+			log.Println(err)
+			break
 		}
-		s.memtable[a[0]] = a[1]
+		key := make([]byte, keyLen)
+		_, err = io.ReadFull(reader, key) //reads exactly len(key) bytes from r into key
+		if err != nil {
+			log.Println(err)
+			break
+		}
+		err = binary.Read(reader, binary.BigEndian, &valueLen)
+		if err != nil {
+			log.Println(err)
+			break
+		}
+		value := make([]byte, valueLen)
+		_, err = io.ReadFull(reader, value)
+		if err != nil {
+			log.Println(err)
+			break
+		}
+		s.memtable[string(key)] = string(value)
 	}
 	q.Close()
-
 	return s, nil
 }

@@ -2,11 +2,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 )
 
 func (s *Store) Get(key string) (string, error) {
@@ -38,22 +38,48 @@ func (s *Store) Get(key string) (string, error) {
 
 		}
 		f.Seek(startOffset, io.SeekStart)
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := scanner.Text()
-			parts := strings.Split(line, ",")
-			if len(parts) != 2 {
-				continue
+		r := bufio.NewReader(f)
+		var searchKeyLen, valueLen uint32
+		for {
+			if err := binary.Read(r, binary.BigEndian, &searchKeyLen); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return "", err
 			}
-			k, v := parts[0], parts[1]
-			if k == key {
+			searchKey := make([]byte, searchKeyLen)
+			if _, err = io.ReadFull(r, searchKey); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return "", err
+			}
+			if err := binary.Read(r, binary.BigEndian, &valueLen); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return "", err
+			}
+			value := make([]byte, valueLen)
+			if _, err = io.ReadFull(r, value); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return "", err
+			}
+			if string(searchKey) == key {
 				f.Close()
-				return v, nil
 
+				return string(value), nil
+			}
+			if string(searchKey) > key {
+				break
 			}
 		}
+
 		f.Close()
+
 	}
 
-	return "", errors.New("key not found")
+	return "", errors.New("searchkey not found")
 }

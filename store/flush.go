@@ -43,8 +43,14 @@ func (s *Store) flushMemtable() {
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k]) //write into file being flushed into
+		//fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k])
+		encode, err := encoder(k, s.memtable[k])
+		if err != nil {
+			log.Fatal(err)
+		}
+		if _, err = f.Write(encode); err != nil {
+			log.Fatal(err)
+		} //write into file being flushed into
 
 		if count%jump == 0 {
 
@@ -59,7 +65,9 @@ func (s *Store) flushMemtable() {
 
 	}
 	s.sstableCount++
+	f.Close()
 	s.wal.Close()
+
 	err = os.Truncate("wal.log", 0)
 	if err != nil {
 		log.Fatal(err)
