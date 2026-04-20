@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bufio"
@@ -16,7 +16,7 @@ func (s *Store) Compact() {
 		first := fmt.Sprintf("ssl_%d.txt", base)
 		consec := fmt.Sprintf("ssl_%d.txt", a)
 
-		out, err := os.Create("ssl_compact.txt")
+		out, err := os.Create("ssl_0_compacting.tmp")
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -48,7 +48,7 @@ func (s *Store) Compact() {
 			split2 = strings.Split(line2, ",")
 		}
 
-		//mergesort
+		//mergesort algorithm
 		for hasLine1 && hasLine2 {
 
 			if split1[0] < split2[0] {
@@ -106,10 +106,24 @@ func (s *Store) Compact() {
 			}
 		}
 
-		//"The merging process is complete, we switch read requests to using the new merged segment instead of the old segments — and then the old segment files can simply be deleted."
-		fir.Close()
-		d.Close()
-		out.Close()
+		//"The merging process is complete, we switch read requests to using the new merged segment instead of the old segments and then the old segment files can simply be deleted."
+
+		if err := fir.Close(); err != nil {
+			log.Fatal(err)
+		}
+		if err := d.Close(); err != nil {
+			log.Fatal(err)
+		}
+		err = out.Sync()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := out.Close(); err != nil {
+			log.Fatal(err)
+		}
+		if err := os.Rename("ssl_0_compacting.tmp", "ssl_0.txt"); err != nil {
+			log.Fatal(err)
+		}
 		err = os.Remove(first)
 		if err != nil {
 			log.Fatal("file failed to delete")
@@ -117,10 +131,6 @@ func (s *Store) Compact() {
 		err = os.Remove(consec)
 		if err != nil {
 			log.Fatal("file failed to delete")
-		}
-		err = os.Rename("ssl_compact.txt", "ssl_0.txt")
-		if err != nil {
-			log.Fatal("file failed to be renamed")
 		}
 		s.sstableCount--
 		a++

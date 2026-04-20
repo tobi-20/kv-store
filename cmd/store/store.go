@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bufio"
@@ -44,26 +44,27 @@ func NewStore(path string) (*Store, error) {
 	//read the wal log into the memtable in case of crash or sudden restart
 	reader := bufio.NewReader(q)
 	var keyLen, valueLen uint32
+	var Op Operation
 	for {
-		err := binary.Read(reader, binary.BigEndian, &keyLen)
-		if err != nil {
+		if err := binary.Read(reader, binary.BigEndian, &Op); err != nil {
+			log.Println(err)
+			break
+		}
+		if err := binary.Read(reader, binary.BigEndian, &keyLen); err != nil {
 			log.Println(err)
 			break
 		}
 		key := make([]byte, keyLen)
-		_, err = io.ReadFull(reader, key) //reads exactly len(key) bytes from r into key
-		if err != nil {
+		if _, err := io.ReadFull(reader, key); err != nil {
 			log.Println(err)
 			break
 		}
-		err = binary.Read(reader, binary.BigEndian, &valueLen)
-		if err != nil {
+		if err := binary.Read(reader, binary.BigEndian, &valueLen); err != nil {
 			log.Println(err)
 			break
 		}
 		value := make([]byte, valueLen)
-		_, err = io.ReadFull(reader, value)
-		if err != nil {
+		if _, err := io.ReadFull(reader, value); err != nil {
 			log.Println(err)
 			break
 		}

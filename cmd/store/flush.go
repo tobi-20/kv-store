@@ -1,20 +1,19 @@
-package main
+package store
 
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"slices"
 )
 
-func (s *Store) flushMemtable() {
+func (s *Store) flushMemtable() error {
 
 	// for{}
 	filepath := fmt.Sprintf("ssl_%d.txt", s.sstableCount)
 	f, err := os.Create(filepath)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	indexBuffer := make([]string, 0, 4097)
@@ -41,15 +40,15 @@ func (s *Store) flushMemtable() {
 	for _, k := range indexBuffer {
 		offset, err := f.Seek(0, io.SeekCurrent) //beginning of the file (initialized for the first time)
 		if err != nil {
-			log.Fatal(err)
+			return (err)
 		}
 		//fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k])
-		encode, err := encoder(k, s.memtable[k])
+		encode, err := encodeWAL(OpSet, k, s.memtable[k])
 		if err != nil {
-			log.Fatal(err)
+			return (err)
 		}
 		if _, err = f.Write(encode); err != nil {
-			log.Fatal(err)
+			return (err)
 		} //write into file being flushed into
 
 		if count%jump == 0 {
@@ -70,14 +69,14 @@ func (s *Store) flushMemtable() {
 
 	err = os.Truncate("wal.log", 0)
 	if err != nil {
-		log.Fatal(err)
+		return (err)
 	}
 	clear(s.memtable)
 	s.memtableSize = 0
 
 	s.wal, err = os.OpenFile("wal.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Fatal(err)
+		return (err)
 	}
-
+	return nil
 }

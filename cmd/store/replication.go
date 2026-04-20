@@ -1,4 +1,4 @@
-package service
+package store
 
 func NewReplicator() (*Replicator, error) {
 	r := &Replicator{

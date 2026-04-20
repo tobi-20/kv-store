@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bufio"
@@ -40,7 +40,15 @@ func (s *Store) Get(key string) (string, error) {
 		f.Seek(startOffset, io.SeekStart)
 		r := bufio.NewReader(f)
 		var searchKeyLen, valueLen uint32
+		var Op Operation
 		for {
+
+			if err := binary.Read(r, binary.BigEndian, &Op); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return "", err
+			}
 			if err := binary.Read(r, binary.BigEndian, &searchKeyLen); err != nil {
 				if errors.Is(err, io.EOF) {
 					break
