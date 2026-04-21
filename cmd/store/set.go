@@ -12,12 +12,13 @@ func (s *Store) Set(key, value string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Println(key, value)
 	if _, err := s.wal.Write(msg); err != nil {
 		log.Fatal(err)
 	} // write to WAL on disk before writing to memtable in case of unexpected crash/restart
 	s.memtable[key] = value // write to memtable
-	if s.replicator != nil {
-		s.replicator.Write(key, value)
+	if s.Replicator != nil {
+		s.Replicator.Write(key, value)
 	}
 
 	s.memtableSize += len(value) + len(key)

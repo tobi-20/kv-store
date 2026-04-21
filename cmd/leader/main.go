@@ -6,22 +6,24 @@ import (
 )
 
 func main() {
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
+
+	log.SetOutput(log.Writer())
 
 	s, err := store.NewStore("./data")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	replicator, err := store.NewReplicator()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-
-	replicator.Start()
-
 	s.SetReplicator(replicator)
 
-	go store.StartLeaderServer(":8080", replicator)
+	replicator.Start() // this initializes the channel receiver for the replicator
 
+	go store.StartLeaderServer(":8081", replicator)
+	store.StartWriteServer(":8080", s)
 	select {}
 }

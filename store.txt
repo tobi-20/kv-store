@@ -1,3 +1,0 @@
-state,ekiti
-tribe,canada
-name,tobiloba

@@ -36,6 +36,29 @@ Replaced CSV text format with a binary length-prefixed encoding:
 - WAL: binary encoded on every write
 - WAL replay: binary decoded on restart
 
+### Chapter 5 — Replication
+
+Single-leader replication over persistent TCP connections
+
+**Key Design Decisions:**
+
+*Logical replication over WAL shipping* — events describe what changed,
+not which bytes changed. Decouples replication protocol from storage format.
+Forward and backward compatible — changing storage format doesn't break
+replication.
+
+*Per-follower goroutine and buffered queue* — each follower gets its own
+goroutine and channel. Slow followers are dropped rather than blocking
+the leader.
+
+*Async replication* — leader acknowledges writes immediately. Followers
+catch up in the background. Optimizes for write throughput over
+strict consistency.
+
+*Dead follower detection* — if a follower's queue is full, it is marked
+dead and removed from the followers list atomically.
+
+
 ## What This Demonstrates
 - Log-structured storage design
 - Memtable + SSTable architecture
