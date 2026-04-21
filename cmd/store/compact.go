@@ -2,138 +2,122 @@ package store
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"os"
-	"strings"
 )
 
 func (s *Store) Compact() {
 	base := 0
-	a := 1
+	next := 1
+
 	for s.sstableCount > 1 {
 
 		first := fmt.Sprintf("ssl_%d.txt", base)
-		consec := fmt.Sprintf("ssl_%d.txt", a)
+		second := fmt.Sprintf("ssl_%d.txt", next)
 
 		out, err := os.Create("ssl_0_compacting.tmp")
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		fir, err := os.Open(first)
+		f1, err := os.Open(first)
 		if err != nil {
 			log.Fatal(err)
 		}
-		d, err := os.Open(consec)
+		f2, err := os.Open(second)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		scanner1 := bufio.NewScanner(fir)
-		scanner2 := bufio.NewScanner(d)
+		r1 := bufio.NewReader(f1)
+		r2 := bufio.NewReader(f2)
 
-		hasLine1 := scanner1.Scan()
-		hasLine2 := scanner2.Scan()
+		var (
+			op1, op2 Operation
+			k1, k2   []byte
+			v1, v2   []byte
+			ok1, ok2 bool
+		)
 
-		var line1, line2 string
-		var split1, split2 []string
+		// helper to read one record
+		read := func(r *bufio.Reader) (Operation, []byte, []byte, bool) {
+			var op Operation
+			var kLen, vLen uint32
 
-		if hasLine1 {
-			line1 = scanner1.Text()
-			split1 = strings.Split(line1, ",")
+			if err := binary.Read(r, binary.BigEndian, &op); err != nil {
+				return 0, nil, nil, false
+			}
+
+			if err := binary.Read(r, binary.BigEndian, &kLen); err != nil {
+				return 0, nil, nil, false
+			}
+
+			key := make([]byte, kLen)
+			if _, err := io.ReadFull(r, key); err != nil {
+				return 0, nil, nil, false
+			}
+
+			if err := binary.Read(r, binary.BigEndian, &vLen); err != nil {
+				return 0, nil, nil, false
+			}
+
+			val := make([]byte, vLen)
+			if _, err := io.ReadFull(r, val); err != nil {
+				return 0, nil, nil, false
+			}
+
+			return op, key, val, true
 		}
-		if hasLine2 {
-			line2 = scanner2.Text()
-			split2 = strings.Split(line2, ",")
-		}
 
-		//mergesort algorithm
-		for hasLine1 && hasLine2 {
+		op1, k1, v1, ok1 = read(r1)
+		op2, k2, v2, ok2 = read(r2)
 
-			if split1[0] < split2[0] {
-				fmt.Fprintln(out, line1)
-				hasLine1 = scanner1.Scan() //advance and return boolean
-				if hasLine1 {
-					line1 = scanner1.Text() //returns most recent scanned line
-					split1 = strings.Split(line1, ",")
-					if len(split1) != 2 {
-						log.Fatal("invalid sstable line format")
-					}
+		for ok1 && ok2 {
 
-				}
-			} else if split1[0] > split2[0] {
-				fmt.Fprintln(out, line2)
-				hasLine2 = scanner2.Scan()
-				if hasLine2 {
-					line2 = scanner2.Text()
-					split2 = strings.Split(line2, ",")
-					if len(split2) != 2 {
-						log.Fatal("invalid sstable line format")
-					}
-				}
+			// compare keys
+			if string(k1) < string(k2) {
+
+				writeRecord(out, op1, k1, v1)
+				op1, k1, v1, ok1 = read(r1)
+
+			} else if string(k1) > string(k2) {
+
+				writeRecord(out, op2, k2, v2)
+				op2, k2, v2, ok2 = read(r2)
+
 			} else {
-				fmt.Fprintln(out, line2) // newer file wins
-				hasLine1 = scanner1.Scan()
-				hasLine2 = scanner2.Scan()
-				if hasLine1 {
-					line1 = scanner1.Text()
-					split1 = strings.Split(line1, ",")
-				}
+				// newer wins
+				writeRecord(out, op2, k2, v2)
 
-				if hasLine2 {
-					line2 = scanner2.Text()
-					split2 = strings.Split(line2, ",")
-				}
-			}
-
-		}
-
-		for hasLine1 {
-			fmt.Fprintln(out, line1)
-			hasLine1 = scanner1.Scan()
-			if hasLine1 {
-				line1 = scanner1.Text()
-
-			}
-		}
-		for hasLine2 {
-			fmt.Fprintln(out, line2)
-			hasLine2 = scanner2.Scan()
-			if hasLine2 {
-				line2 = scanner2.Text()
-
+				op1, k1, v1, ok1 = read(r1)
+				op2, k2, v2, ok2 = read(r2)
 			}
 		}
 
-		//"The merging process is complete, we switch read requests to using the new merged segment instead of the old segments and then the old segment files can simply be deleted."
+		for ok1 {
+			writeRecord(out, op1, k1, v1)
+			op1, k1, v1, ok1 = read(r1)
+		}
 
-		if err := fir.Close(); err != nil {
-			log.Fatal(err)
+		for ok2 {
+			writeRecord(out, op2, k2, v2)
+			op2, k2, v2, ok2 = read(r2)
 		}
-		if err := d.Close(); err != nil {
-			log.Fatal(err)
-		}
-		err = out.Sync()
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := out.Close(); err != nil {
-			log.Fatal(err)
-		}
-		if err := os.Rename("ssl_0_compacting.tmp", "ssl_0.txt"); err != nil {
-			log.Fatal(err)
-		}
-		err = os.Remove(first)
-		if err != nil {
-			log.Fatal("file failed to delete")
-		}
-		err = os.Remove(consec)
-		if err != nil {
-			log.Fatal("file failed to delete")
-		}
+
+		f1.Close()
+		f2.Close()
+
+		out.Sync()
+		out.Close()
+
+		os.Rename("ssl_0_compacting.tmp", "ssl_0.txt")
+		os.Remove(first)
+		os.Remove(second)
+
 		s.sstableCount--
-		a++
+		next++
 	}
-
 }

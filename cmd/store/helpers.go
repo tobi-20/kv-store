@@ -1,10 +1,13 @@
 package store
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"io"
 	"net"
+	"os"
+	"sort"
 	"sync/atomic"
 )
 
@@ -18,6 +21,7 @@ func (f *Follower) writerLoop() { //3
 		}
 	}
 }
+
 func (r *Replicator) Start() { //2
 
 	go func() {
@@ -98,6 +102,7 @@ func Encode(w io.Writer, e ReplicationEvent) error { //4
 	if _, err := w.Write([]byte(e.Value)); err != nil {
 		return err
 	}
+
 	return nil
 
 }
@@ -159,15 +164,16 @@ func HandleConn(conn net.Conn, store *Store) {
 			store.Set(event.Key, event.Value)
 
 		case OpDelete:
-			// store.Delete(event.Key)
+
+			store.Delete(event.Key)
 		}
 	}
 }
 
-func encodeWAL(op Operation, key, value string) ([]byte, error) {
+func encodeWAL(Op Operation, key, value string) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
-	if err := binary.Write(buf, binary.BigEndian, op); err != nil {
+	if err := binary.Write(buf, binary.BigEndian, Op); err != nil {
 		return nil, err
 	}
 
@@ -187,7 +193,7 @@ func encodeWAL(op Operation, key, value string) ([]byte, error) {
 }
 
 func (s *Store) SetReplicator(r *Replicator) {
-	s.replicator = r
+	s.Replicator = r
 
 }
 
@@ -199,5 +205,88 @@ func (r *Replicator) WriteDelete(key string) {
 		Seq: seq,
 		Key: key,
 		Op:  OpDelete,
+	}
+}
+
+func findOffset(entries []SparseIndexEntry, key string) (int64, bool) {
+
+	i := sort.Search(len(entries), func(i int) bool {
+		return entries[i].key > key
+	})
+
+	if i == 0 {
+		return 0, false
+	}
+
+	return entries[i-1].offset, true
+}
+
+func (s *Store) readAt(filePath string, offset int64) (string, Operation, error) {
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+
+	_, err = f.Seek(offset, io.SeekStart)
+	if err != nil {
+		return "", 0, err
+	}
+
+	r := bufio.NewReader(f)
+
+	var op Operation
+	var keyLen uint32
+	var valLen uint32
+
+	if err := binary.Read(r, binary.BigEndian, &op); err != nil {
+		return "", 0, err
+	}
+
+	if err := binary.Read(r, binary.BigEndian, &keyLen); err != nil {
+		return "", 0, err
+	}
+
+	key := make([]byte, keyLen)
+	if _, err := io.ReadFull(r, key); err != nil {
+		return "", 0, err
+	}
+
+	if err := binary.Read(r, binary.BigEndian, &valLen); err != nil {
+		return "", 0, err
+	}
+
+	val := make([]byte, valLen)
+	if _, err := io.ReadFull(r, val); err != nil {
+		return "", 0, err
+	}
+
+	return string(val), op, nil
+}
+
+func writeRecord(w *os.File, op Operation, key, value []byte) {
+	binary.Write(w, binary.BigEndian, op)
+	binary.Write(w, binary.BigEndian, uint32(len(key)))
+	w.Write(key)
+	binary.Write(w, binary.BigEndian, uint32(len(value)))
+	w.Write(value)
+}
+func handleWrite(conn net.Conn, s *Store) {
+	defer conn.Close()
+
+	for {
+		event, err := Decode(conn)
+		if err != nil {
+			return
+		}
+
+		switch event.Op {
+		case OpSet:
+			s.Set(event.Key, event.Value)
+
+		case OpDelete:
+			s.Delete(event.Key)
+		}
 	}
 }

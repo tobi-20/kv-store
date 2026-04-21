@@ -1,0 +1,946 @@
+
+===== ./cmd/client/main.go =====
+package main
+
+import (
+	"ddia/cmd/store"
+	"fmt"
+	"log"
+	"net"
+)
+
+func main() {
+	
+
+	conn, err := net.Dial("tcp", "localhost:8080")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	for i := 1; i <= 10000; i++ {
+
+		event := store.ReplicationEvent{
+			ID:    "xyz",
+			Seq:   uint64(i),
+			Op:    store.OpSet,
+			Key:   fmt.Sprintf("x%d", i),
+			Value: fmt.Sprintf("%d", i*10),
+		}
+
+
+		if err := store.Encode(conn, event); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
+===== ./cmd/follower/main.go =====
+package main
+
+import (
+	"ddia/cmd/store"
+	"log"
+	"net"
+)
+
+func main() {
+
+	s, err := store.NewStore("./data")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	conn, err := net.Dial("tcp", "localhost:8080")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	store.HandleConn(conn, s)
+}
+
+===== ./cmd/leader/main.go =====
+package main
+
+import (
+	"ddia/cmd/store"
+	"log"
+)
+
+func main() {
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
+
+	log.SetOutput(log.Writer())
+
+	s, err := store.NewStore("./data")
+	if err != nil {
+		panic(err)
+	}
+
+	replicator, err := store.NewReplicator()
+	if err != nil {
+		panic(err)
+	}
+	s.SetReplicator(replicator)
+
+	replicator.Start() // this initializes the channel receiver for the replicator
+
+	go store.StartLeaderServer(":8080", replicator)
+	store.StartWriteServer(":8080", s)
+	select {}
+}
+
+===== ./cmd/store/compact.go =====
+package store
+
+import (
+	"bufio"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"log"
+	"os"
+)
+
+func (s *Store) Compact() {
+	base := 0
+	next := 1
+
+	for s.sstableCount > 1 {
+
+		first := fmt.Sprintf("ssl_%d.txt", base)
+		second := fmt.Sprintf("ssl_%d.txt", next)
+
+		out, err := os.Create("ssl_0_compacting.tmp")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		f1, err := os.Open(first)
+		if err != nil {
+			log.Fatal(err)
+		}
+		f2, err := os.Open(second)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		r1 := bufio.NewReader(f1)
+		r2 := bufio.NewReader(f2)
+
+		var (
+			op1, op2 Operation
+			k1, k2   []byte
+			v1, v2   []byte
+			ok1, ok2 bool
+		)
+
+		// helper to read one record
+		read := func(r *bufio.Reader) (Operation, []byte, []byte, bool) {
+			var op Operation
+			var kLen, vLen uint32
+
+			if err := binary.Read(r, binary.BigEndian, &op); err != nil {
+				return 0, nil, nil, false
+			}
+
+			if err := binary.Read(r, binary.BigEndian, &kLen); err != nil {
+				return 0, nil, nil, false
+			}
+
+			key := make([]byte, kLen)
+			if _, err := io.ReadFull(r, key); err != nil {
+				return 0, nil, nil, false
+			}
+
+			if err := binary.Read(r, binary.BigEndian, &vLen); err != nil {
+				return 0, nil, nil, false
+			}
+
+			val := make([]byte, vLen)
+			if _, err := io.ReadFull(r, val); err != nil {
+				return 0, nil, nil, false
+			}
+
+			return op, key, val, true
+		}
+
+		op1, k1, v1, ok1 = read(r1)
+		op2, k2, v2, ok2 = read(r2)
+
+		for ok1 && ok2 {
+
+			// compare keys
+			if string(k1) < string(k2) {
+
+				writeRecord(out, op1, k1, v1)
+				op1, k1, v1, ok1 = read(r1)
+
+			} else if string(k1) > string(k2) {
+
+				writeRecord(out, op2, k2, v2)
+				op2, k2, v2, ok2 = read(r2)
+
+			} else {
+				// newer wins
+				writeRecord(out, op2, k2, v2)
+
+				op1, k1, v1, ok1 = read(r1)
+				op2, k2, v2, ok2 = read(r2)
+			}
+		}
+
+		for ok1 {
+			writeRecord(out, op1, k1, v1)
+			op1, k1, v1, ok1 = read(r1)
+		}
+
+		for ok2 {
+			writeRecord(out, op2, k2, v2)
+			op2, k2, v2, ok2 = read(r2)
+		}
+
+		f1.Close()
+		f2.Close()
+
+		out.Sync()
+		out.Close()
+
+		os.Rename("ssl_0_compacting.tmp", "ssl_0.txt")
+		os.Remove(first)
+		os.Remove(second)
+
+		s.sstableCount--
+		next++
+	}
+}
+
+===== ./cmd/store/delete.go =====
+package store
+
+const Tombstone = "__tombstone__" // uses a tombstone
+func (s *Store) Delete(key string) error {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	msg, err := encodeWAL(OpDelete, key, Tombstone)
+	if err != nil {
+		return err
+	}
+
+	if _, err := s.wal.Write(msg); err != nil {
+		return err
+	}
+
+	s.memtable[key] = Tombstone
+
+	s.memtableSize += len(key) + len(Tombstone) // since the new value is Tombstone
+
+	if s.memtableSize >= 4096 {
+		return s.flushMemtable()
+	}
+
+	return nil
+}
+
+===== ./cmd/store/flush.go =====
+package store
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"slices"
+)
+
+func (s *Store) flushMemtable() error {
+
+	// for{}
+	filepath := fmt.Sprintf("ssl_%d.txt", s.sstableCount)
+	f, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+
+	indexBuffer := make([]string, 0, 4097)
+	for k := range s.memtable {
+		indexBuffer = append(indexBuffer, k)
+	}
+	slices.SortFunc(indexBuffer, func(a string, b string) int {
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+
+		return 0
+	})
+
+	jump := 10
+	count := 0
+	if s.index[filepath] == nil {
+		s.index[filepath] = make([]SparseIndexEntry, 0, len(indexBuffer)/jump+1) // allocate proper capacity
+	}
+
+	for _, k := range indexBuffer {
+		offset, err := f.Seek(0, io.SeekCurrent) //beginning of the file (initialized for the first time)
+		if err != nil {
+			return (err)
+		}
+		//fmt.Fprintf(f, "%s,%s\n", k, s.memtable[k])
+		encode, err := encodeWAL(OpSet, k, s.memtable[k])
+		if err != nil {
+			return (err)
+		}
+		if _, err = f.Write(encode); err != nil {
+			return (err)
+		} //write into file being flushed into
+
+		if count%jump == 0 {
+
+			// add to the SSTable's sparse index slice
+			s.index[filepath] = append(s.index[filepath], SparseIndexEntry{
+				key:    k,
+				offset: offset,
+			})
+		}
+
+		count++
+
+	}
+	s.sstableCount++
+	f.Close()
+	s.wal.Close()
+
+	err = os.Truncate("wal.log", 0)
+	if err != nil {
+		return (err)
+	}
+	clear(s.memtable)
+	s.memtableSize = 0
+
+	s.wal, err = os.OpenFile("wal.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return (err)
+	}
+	return nil
+}
+
+===== ./cmd/store/follower.go =====
+package store
+
+import "net"
+
+func NewFollower(conn net.Conn) *Follower {
+	f := &Follower{
+		conn:  conn,
+		queue: make(chan ReplicationEvent, 100),
+	}
+
+	go f.writerLoop()
+	return f
+}
+
+func StartFollower(addr string, store *Store) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				continue
+			}
+
+			go HandleConn(conn, store)
+		}
+	}()
+
+	return nil
+}
+
+===== ./cmd/store/get.go =====
+package store
+
+import (
+	"errors"
+	"fmt"
+)
+
+func (s *Store) Get(key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// 1. check MEMTABLE first
+	if v, ok := s.memtable[key]; ok {
+		if v == Tombstone {
+			return "", nil
+		}
+		return v, nil
+	}
+
+	// 2. SSTABLES (newest → oldest)
+	for i := s.sstableCount - 1; i >= 0; i-- {
+
+		filePath := fmt.Sprintf("ssl_%d.txt", i)
+
+		entries := s.index[filePath]
+		if len(entries) == 0 {
+			continue
+		}
+
+		// 3. FIND OFFSET IN INDEX (binary search)
+		offset, found := findOffset(entries, key)
+		if !found {
+			continue
+		}
+
+		// 4. SEEK + DECODE ONE RECORD
+		val, op, err := s.readAt(filePath, offset)
+		if err != nil {
+			return "", err
+		}
+
+		// tombstone rule
+		if op == OpDelete {
+			return "", nil
+		}
+
+		return val, nil
+	}
+
+	return "", errors.New("not found")
+}
+
+===== ./cmd/store/helpers.go =====
+package store
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
+	"io"
+	"net"
+	"os"
+	"sort"
+	"sync/atomic"
+)
+
+func (f *Follower) writerLoop() { //3
+
+	for event := range f.queue {
+		err := Encode(f.conn, event)
+		if err != nil {
+			f.conn.Close()
+			return
+		}
+	}
+}
+
+func (r *Replicator) Start() { //2
+
+	go func() {
+		for event := range r.eventCh {
+			dead := make([]*Follower, 0)
+			r.mu.RLock()
+			//lock so followers do not get modified while reading from them
+			for _, f := range r.followers {
+				select {
+				case f.queue <- event:
+				default:
+					dead = append(dead, f)
+				}
+			}
+			r.mu.RUnlock()
+			if len(dead) > 0 {
+				r.mu.Lock()
+				for _, d := range dead {
+					r.removeFollower(d)
+				}
+				r.mu.Unlock()
+			}
+
+		} //dispatcher
+
+	}()
+}
+func (r *Replicator) Write(key, value string) { //1
+
+	seq := atomic.AddUint64(&r.seq, 1)
+
+	action := ReplicationEvent{
+		Seq:   seq,
+		Key:   key,
+		Value: value,
+	}
+	r.eventCh <- action
+}
+
+func (r *Replicator) removeFollower(defect *Follower) { //5
+	for i, f := range r.followers {
+		if f == defect {
+			// remove from slice
+			r.followers[i] = r.followers[len(r.followers)-1] // replace the last element in the followers slice
+			r.followers = r.followers[:len(r.followers)-1]   //remove the second occurrence of the last element
+
+			// cleanup
+			close(f.queue)
+			f.conn.Close()
+
+			return
+		}
+	}
+}
+
+func Encode(w io.Writer, e ReplicationEvent) error { //4
+	if err := binary.Write(w, binary.BigEndian, e.Seq); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, e.Op); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(len(e.ID))); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte(e.ID)); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(len(e.Key))); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte(e.Key)); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(len(e.Value))); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte(e.Value)); err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
+func Decode(r io.Reader) (ReplicationEvent, error) {
+	var e ReplicationEvent
+	var keyLen, valueLen, IDLen uint32
+
+	if err := binary.Read(r, binary.BigEndian, &e.Seq); err != nil {
+		return ReplicationEvent{}, err
+	}
+	if err := binary.Read(r, binary.BigEndian, &e.Op); err != nil {
+		return ReplicationEvent{}, err
+	}
+	if err := binary.Read(r, binary.BigEndian, &IDLen); err != nil {
+		return ReplicationEvent{}, err
+	}
+	ID := make([]byte, IDLen)
+	if _, err := io.ReadFull(r, ID); err != nil {
+		return ReplicationEvent{}, err
+	}
+
+	if err := binary.Read(r, binary.BigEndian, &keyLen); err != nil {
+		return ReplicationEvent{}, err
+	}
+	key := make([]byte, keyLen)
+	if _, err := io.ReadFull(r, key); err != nil {
+		return ReplicationEvent{}, err
+	}
+	if err := binary.Read(r, binary.BigEndian, &valueLen); err != nil {
+		return ReplicationEvent{}, err
+	}
+	value := make([]byte, valueLen)
+
+	if _, err := io.ReadFull(r, value); err != nil {
+		return ReplicationEvent{}, err
+	}
+
+	return ReplicationEvent{
+		ID:    string(ID),
+		Seq:   e.Seq,
+		Key:   string(key),
+		Value: string(value),
+		Op:    e.Op,
+	}, nil
+}
+
+func HandleConn(conn net.Conn, store *Store) {
+	defer conn.Close()
+
+	for {
+		event, err := Decode(conn)
+		if err != nil {
+			return
+		}
+
+		switch event.Op {
+		case OpSet:
+			store.Set(event.Key, event.Value)
+
+		case OpDelete:
+
+			store.Delete(event.Key)
+		}
+	}
+}
+
+func encodeWAL(Op Operation, key, value string) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	if err := binary.Write(buf, binary.BigEndian, Op); err != nil {
+		return nil, err
+	}
+
+	if err := binary.Write(buf, binary.BigEndian, uint32(len(key))); err != nil {
+		return nil, err
+	}
+
+	buf.Write([]byte(key))
+
+	if err := binary.Write(buf, binary.BigEndian, uint32(len(value))); err != nil {
+		return nil, err
+	}
+
+	buf.Write([]byte(value))
+
+	return buf.Bytes(), nil
+}
+
+func (s *Store) SetReplicator(r *Replicator) {
+	s.Replicator = r
+
+}
+
+func (r *Replicator) WriteDelete(key string) {
+
+	seq := atomic.AddUint64(&r.seq, 1)
+
+	r.eventCh <- ReplicationEvent{
+		Seq: seq,
+		Key: key,
+		Op:  OpDelete,
+	}
+}
+
+func findOffset(entries []SparseIndexEntry, key string) (int64, bool) {
+
+	i := sort.Search(len(entries), func(i int) bool {
+		return entries[i].key > key
+	})
+
+	if i == 0 {
+		return 0, false
+	}
+
+	return entries[i-1].offset, true
+}
+
+func (s *Store) readAt(filePath string, offset int64) (string, Operation, error) {
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+
+	_, err = f.Seek(offset, io.SeekStart)
+	if err != nil {
+		return "", 0, err
+	}
+
+	r := bufio.NewReader(f)
+
+	var op Operation
+	var keyLen uint32
+	var valLen uint32
+
+	if err := binary.Read(r, binary.BigEndian, &op); err != nil {
+		return "", 0, err
+	}
+
+	if err := binary.Read(r, binary.BigEndian, &keyLen); err != nil {
+		return "", 0, err
+	}
+
+	key := make([]byte, keyLen)
+	if _, err := io.ReadFull(r, key); err != nil {
+		return "", 0, err
+	}
+
+	if err := binary.Read(r, binary.BigEndian, &valLen); err != nil {
+		return "", 0, err
+	}
+
+	val := make([]byte, valLen)
+	if _, err := io.ReadFull(r, val); err != nil {
+		return "", 0, err
+	}
+
+	return string(val), op, nil
+}
+
+func writeRecord(w *os.File, op Operation, key, value []byte) {
+	binary.Write(w, binary.BigEndian, op)
+	binary.Write(w, binary.BigEndian, uint32(len(key)))
+	w.Write(key)
+	binary.Write(w, binary.BigEndian, uint32(len(value)))
+	w.Write(value)
+}
+func handleWrite(conn net.Conn, s *Store) {
+	defer conn.Close()
+
+	for {
+		event, err := Decode(conn)
+		if err != nil {
+			return
+		}
+
+		switch event.Op {
+		case OpSet:
+			s.Set(event.Key, event.Value)
+
+		case OpDelete:
+			s.Delete(event.Key)
+		}
+	}
+}
+
+===== ./cmd/store/LeaderServer.go =====
+package store
+
+import (
+	"log"
+	"net"
+)
+
+func StartLeaderServer(addr string, replicator *Replicator) {
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+
+		follower := NewFollower(conn)
+
+		replicator.mu.Lock()
+		replicator.followers = append(replicator.followers, follower)
+		replicator.mu.Unlock()
+	}
+}
+
+func StartWriteServer(addr string, s *Store) {
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+
+		go handleWrite(conn, s)
+	}
+}
+
+===== ./cmd/store/replication.go =====
+package store
+
+func NewReplicator() (*Replicator, error) {
+	r := &Replicator{
+		eventCh:   make(chan ReplicationEvent, 100),
+		followers: make([]*Follower, 0, 10),
+	}
+	return r, nil
+}
+
+===== ./cmd/store/set.go =====
+package store
+
+import (
+	"log"
+)
+
+func (s *Store) Set(key, value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	//"When a write comes in, add it to an in-memory balanced tree data structure. This in-memory tree is sometimes called a memtable. When the memtable gets bigger than some threshold write it out to disk as an SSTable file."
+	msg, err := encodeWAL(OpSet, key, value)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(key, value)
+	if _, err := s.wal.Write(msg); err != nil {
+		log.Fatal(err)
+	} // write to WAL on disk before writing to memtable in case of unexpected crash/restart
+	s.memtable[key] = value // write to memtable
+	if s.Replicator != nil {
+		s.Replicator.Write(key, value)
+	}
+
+	s.memtableSize += len(value) + len(key)
+	if s.memtableSize >= 4096 {
+		s.flushMemtable()
+	}
+
+}
+
+===== ./cmd/store/store.go =====
+package store
+
+import (
+	"bufio"
+	"encoding/binary"
+	"errors"
+	"io"
+	"log"
+	"os"
+	"strings"
+)
+
+// load file from disk
+func NewStore(path string) (*Store, error) {
+
+	s := &Store{
+
+		index: make(map[string][]SparseIndexEntry),
+		path:  path,
+	}
+	wal, err := os.OpenFile("wal.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //"... if the database crashes, the most recent writes (which are in the memtable but not yet written out to disk) are lost. In order to avoid that problem, we can keep a separate log on disk to which every write is immediately appended"
+	if err != nil {
+		return nil, err
+	}
+
+	s.wal = wal
+
+	q, err := os.Open("wal.log")
+	if err != nil {
+		return nil, err
+	}
+
+	files, err := os.ReadDir(".") //reads the named directory, returning all its directory entries sorted by filename.
+	if err != nil {
+		log.Println(err)
+	}
+
+	for _, v := range files {
+		if strings.HasPrefix(v.Name(), "ssl_") {
+			s.sstableCount++
+		}
+	}
+
+	//read the wal log into the memtable in case of crash or sudden restart
+	reader := bufio.NewReader(q)
+
+	var keyLen, valueLen uint32
+	var op Operation
+
+	for {
+		if err := binary.Read(reader, binary.BigEndian, &op); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			log.Println(err)
+			break
+		}
+
+		if err := binary.Read(reader, binary.BigEndian, &keyLen); err != nil {
+			log.Println(err)
+			break
+		}
+
+		key := make([]byte, keyLen)
+		if _, err := io.ReadFull(reader, key); err != nil {
+			log.Println(err)
+			break
+		}
+
+		if err := binary.Read(reader, binary.BigEndian, &valueLen); err != nil {
+			log.Println(err)
+			break
+		}
+
+		value := make([]byte, valueLen)
+		if _, err := io.ReadFull(reader, value); err != nil {
+			log.Println(err)
+			break
+		}
+
+		switch op {
+		case OpSet:
+			s.memtable[string(key)] = string(value)
+		case OpDelete:
+			s.memtable[string(key)] = Tombstone
+		}
+	}
+
+	q.Close()
+	return s, nil
+}
+
+===== ./cmd/store/types.go =====
+package store
+
+import (
+	"net"
+	"os"
+	"sync"
+)
+
+type Store struct {
+	memtable     map[string]string
+	memtableSize int
+	sstableCount int
+	path         string
+	wal          *os.File
+	index        map[string][]SparseIndexEntry
+	mu           sync.RWMutex
+	Replicator   *Replicator
+}
+type Replicator struct {
+	seq       uint64
+	mu        sync.RWMutex
+	followers []*Follower
+	eventCh   chan ReplicationEvent
+}
+type SparseIndexEntry struct {
+	offset int64
+	key    string
+	Op     Operation
+}
+
+type Replica interface {
+	Send(ReplicationEvent) error
+}
+type ReplicationEvent struct {
+	ID    string
+	Seq   uint64
+	Key   string
+	Value string
+	Op    Operation
+}
+
+type Follower struct {
+	conn  net.Conn
+	queue chan ReplicationEvent
+}
+
+type Operation uint8
+
+const (
+	OpSet Operation = iota
+	OpDelete
+)

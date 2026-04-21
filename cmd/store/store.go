@@ -3,6 +3,7 @@ package store
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -14,9 +15,8 @@ func NewStore(path string) (*Store, error) {
 
 	s := &Store{
 
-		memtable: make(map[string]string),
-		index:    make(map[string][]SparseIndexEntry),
-		path:     path,
+		index: make(map[string][]SparseIndexEntry),
+		path:  path,
 	}
 	wal, err := os.OpenFile("wal.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //"... if the database crashes, the most recent writes (which are in the memtable but not yet written out to disk) are lost. In order to avoid that problem, we can keep a separate log on disk to which every write is immediately appended"
 	if err != nil {
@@ -43,33 +43,49 @@ func NewStore(path string) (*Store, error) {
 
 	//read the wal log into the memtable in case of crash or sudden restart
 	reader := bufio.NewReader(q)
+
 	var keyLen, valueLen uint32
-	var Op Operation
+	var op Operation
+
 	for {
-		if err := binary.Read(reader, binary.BigEndian, &Op); err != nil {
+		if err := binary.Read(reader, binary.BigEndian, &op); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
 			log.Println(err)
 			break
 		}
+
 		if err := binary.Read(reader, binary.BigEndian, &keyLen); err != nil {
 			log.Println(err)
 			break
 		}
+
 		key := make([]byte, keyLen)
 		if _, err := io.ReadFull(reader, key); err != nil {
 			log.Println(err)
 			break
 		}
+
 		if err := binary.Read(reader, binary.BigEndian, &valueLen); err != nil {
 			log.Println(err)
 			break
 		}
+
 		value := make([]byte, valueLen)
 		if _, err := io.ReadFull(reader, value); err != nil {
 			log.Println(err)
 			break
 		}
-		s.memtable[string(key)] = string(value)
+
+		switch op {
+		case OpSet:
+			s.memtable[string(key)] = string(value)
+		case OpDelete:
+			s.memtable[string(key)] = Tombstone
+		}
 	}
+
 	q.Close()
 	return s, nil
 }

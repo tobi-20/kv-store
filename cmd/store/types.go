@@ -14,7 +14,7 @@ type Store struct {
 	wal          *os.File
 	index        map[string][]SparseIndexEntry
 	mu           sync.RWMutex
-	replicator   *Replicator
+	Replicator   *Replicator
 }
 type Replicator struct {
 	seq       uint64
@@ -25,6 +25,7 @@ type Replicator struct {
 type SparseIndexEntry struct {
 	offset int64
 	key    string
+	Op     Operation
 }
 
 type Replica interface {
